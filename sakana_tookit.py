@@ -5,24 +5,30 @@ import os
 import sys
 import locale
 from datetime import datetime
-import importlib.util
-import inspect
 import random
 import string
+import struct
+import hashlib
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import secrets
 
 class CryptoApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Sakana Toolkit")
+        # 设置初始窗口尺寸为1280×720
+        self.root.geometry("1280x720")
+        # 设置窗口最小尺寸
+        self.root.minsize(1024, 576)
         
         # 程序元信息
-        self.version = "0.1.0.7"
+        self.version = "0.1.0.8"
         self.author = "KArabella"
         
         # 初始化基本属性
         self.history = []
         self.custom_mappings = {}
-        self.plugins = {}
         
         # 初始化本地化系统（先加载默认语言包）
         self.language_packs = {
@@ -60,20 +66,305 @@ class CryptoApp:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # 先创建设置页
+        # 创建设置页
         self._setup_settings_tab()
         
-        # 再创建其他标签页
+        # 创建凯撒密码标签页
         self._setup_caesar_tab()
         
-        # 最后加载插件
-        self._load_builtin_plugins()
+        # 创建文件嵌入工具标签页
+        self._setup_file_embed_tab()
         
         # 确保设置页在最前
         self.notebook.select(0)
         
         # 初始化后更新UI语言
         self._update_ui_language()
+
+                # 新增摩斯电码相关变量
+        self.morse_code_dict = {
+            'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
+            'G': '--.', 'H': '....', 'I': '..', 'J': '.---', 'K': '-.-', 'L': '.-..',
+            'M': '--', 'N': '-.', 'O': '---', 'P': '.--.', 'Q': '--.-', 'R': '.-.',
+            'S': '...', 'T': '-', 'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-',
+            'Y': '-.--', 'Z': '--..', '0': '-----', '1': '.----', '2': '..---',
+            '3': '...--', '4': '....-', '5': '.....', '6': '-....', '7': '--...',
+            '8': '---..', '9': '----.', '.': '.-.-.-', ',': '--..--', '?': '..--..',
+            "'": '.----.', '!': '-.-.--', '/': '-..-.', '(': '-.--.', ')': '-.--.-',
+            '&': '.-...', ':': '---...', ';': '-.-.-.', '=': '-...-', '+': '.-.-.',
+            '-': '-....-', '_': '..--.-', '"': '.-..-.', '$': '...-..-', '@': '.--.-.',
+            ' ': '/'
+        }
+        # 反向字典
+        self.reverse_morse_dict = {v: k for k, v in self.morse_code_dict.items()}
+
+    def _setup_morse_tab(self):
+        """摩斯电码标签页"""
+        self.morse_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.morse_tab, text=self._tr("Morse Code"))
+        
+        # 操作模式选择
+        mode_frame = ttk.LabelFrame(self.morse_tab, text=self._tr("Operation Mode"))
+        mode_frame.pack(fill="x", padx=10, pady=5)
+        
+        self.morse_mode_var = tk.StringVar(value="text")
+        ttk.Radiobutton(mode_frame, text=self._tr("Text Mode"), variable=self.morse_mode_var, 
+                       value="text", command=self._toggle_morse_mode).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text=self._tr("Audio Mode"), variable=self.morse_mode_var, 
+                       value="audio", command=self._toggle_morse_mode).pack(side="left", padx=5)
+        
+        # 文本模式组件
+        self.text_mode_frame = ttk.Frame(self.morse_tab)
+        self.text_mode_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # 输入输出区域
+        io_frame = ttk.Frame(self.text_mode_frame)
+        io_frame.pack(fill="both", expand=True)
+        
+        ttk.Label(io_frame, text=self._tr("Input:")).grid(row=0, column=0, sticky="w")
+        self.morse_input = tk.Text(io_frame, height=10, wrap="word", font=('Bender', 10))
+        self.morse_input.grid(row=1, column=0, sticky="nsew")
+        
+        ttk.Label(io_frame, text=self._tr("Output:")).grid(row=0, column=1, sticky="w")
+        self.morse_output = tk.Text(io_frame, height=10, wrap="word", font=('Bender', 10))
+        self.morse_output.grid(row=1, column=1, sticky="nsew")
+        
+        # 按钮区域
+        button_frame = ttk.Frame(self.text_mode_frame)
+        button_frame.pack(fill="x", pady=5)
+        
+        ttk.Button(button_frame, text=self._tr("Encrypt"), command=self.morse_encrypt).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Decrypt"), command=self.morse_decrypt).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Play Morse"), command=self.play_morse_sound).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Clear"), command=self.clear_morse_io).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Save Audio"), command=self.save_morse_audio).pack(side="left", padx=5)
+        
+        # 音频模式组件 (初始隐藏)
+        self.audio_mode_frame = ttk.Frame(self.morse_tab)
+        
+        ttk.Label(self.audio_mode_frame, text=self._tr("Audio File:")).pack(side="left")
+        self.audio_file_var = tk.StringVar()
+        ttk.Entry(self.audio_mode_frame, textvariable=self.audio_file_var, width=40).pack(side="left", padx=5)
+        ttk.Button(self.audio_mode_frame, text=self._tr("Browse"), command=self.browse_audio_file).pack(side="left", padx=5)
+        
+        ttk.Button(self.audio_mode_frame, text=self._tr("Decode Audio"), command=self.decode_morse_audio).pack(side="left", padx=5)
+        
+        # 配置网格权重
+        io_frame.grid_rowconfigure(1, weight=1)
+        io_frame.grid_columnconfigure(0, weight=1)
+        io_frame.grid_columnconfigure(1, weight=1)
+        
+        # 初始显示文本模式
+        self._toggle_morse_mode()
+
+    def _toggle_morse_mode(self):
+        """切换摩斯电码模式"""
+        if self.morse_mode_var.get() == "text":
+            self.text_mode_frame.pack(fill="both", expand=True, padx=10, pady=5)
+            self.audio_mode_frame.pack_forget()
+        else:
+            self.text_mode_frame.pack_forget()
+            self.audio_mode_frame.pack(fill="x", padx=10, pady=5)
+
+    def morse_encrypt(self):
+        """加密文本为摩斯电码"""
+        text = self.morse_input.get("1.0", tk.END).strip().upper()
+        if not text:
+            messagebox.showwarning(self._tr("Warning"), self._tr("Input is empty"))
+            return
+        
+        try:
+            morse_code = []
+            for char in text:
+                if char in self.morse_code_dict:
+                    morse_code.append(self.morse_code_dict[char])
+                else:
+                    morse_code.append(' ')
+            
+            result = ' '.join(morse_code)
+            self.morse_output.delete("1.0", tk.END)
+            self.morse_output.insert("1.0", result)
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Encryption failed')}: {str(e)}")
+
+    def morse_decrypt(self):
+        """解密摩斯电码为文本"""
+        morse_code = self.morse_input.get("1.0", tk.END).strip()
+        if not morse_code:
+            messagebox.showwarning(self._tr("Warning"), self._tr("Input is empty"))
+            return
+        
+        try:
+            text = []
+            for code in morse_code.split(' '):
+                if code in self.reverse_morse_dict:
+                    text.append(self.reverse_morse_dict[code])
+                elif code == '':
+                    text.append(' ')
+                else:
+                    text.append('?')
+            
+            result = ''.join(text)
+            self.morse_output.delete("1.0", tk.END)
+            self.morse_output.insert("1.0", result)
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Decryption failed')}: {str(e)}")
+
+    def play_morse_sound(self):
+        """播放摩斯电码音频"""
+        morse_code = self.morse_output.get("1.0", tk.END).strip()
+        if not morse_code:
+            messagebox.showwarning(self._tr("Warning"), self._tr("No morse code to play"))
+            return
+        
+        try:
+            # 简单实现 - 使用系统蜂鸣声
+            import winsound
+            for symbol in morse_code:
+                if symbol == '.':
+                    winsound.Beep(1000, 100)  # 短音
+                elif symbol == '-':
+                    winsound.Beep(1000, 300)  # 长音
+                elif symbol == ' ':
+                    import time
+                    time.sleep(0.3)  # 字符间暂停
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Failed to play sound')}: {str(e)}")
+
+    def save_morse_audio(self):
+        """保存摩斯电码为音频文件"""
+        morse_code = self.morse_output.get("1.0", tk.END).strip()
+        if not morse_code:
+            messagebox.showwarning(self._tr("Warning"), self._tr("No morse code to save"))
+            return
+        
+        try:
+            # 尝试导入必要的库
+            from pydub import AudioSegment
+            from pydub.generators import Sine
+        except ImportError:
+            # 如果库未安装，显示更详细的安装说明
+            install_msg = self._tr("Audio libraries not installed. Please install with: pip install pydub")
+            messagebox.showerror(self._tr("Error"), install_msg)
+            return
+        
+        try:
+            # 创建音频片段
+            dot = Sine(1000).to_audio_segment(duration=100)
+            dash = Sine(1000).to_audio_segment(duration=300)
+            silence = AudioSegment.silent(duration=100)
+            char_silence = AudioSegment.silent(duration=300)
+            
+            audio = AudioSegment.empty()
+            
+            for symbol in morse_code:
+                if symbol == '.':
+                    audio += dot
+                elif symbol == '-':
+                    audio += dash
+                elif symbol == ' ':
+                    audio += char_silence
+                audio += silence  # 符号间暂停
+            
+            # 确保Output目录存在
+            output_dir = os.path.join(self.program_dir, "Output")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 生成默认文件名
+            default_filename = f"morse_code_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+            default_path = os.path.join(output_dir, default_filename)
+            
+            # 弹出保存对话框，默认路径为Output目录
+            filename = filedialog.asksaveasfilename(
+                initialdir=output_dir,
+                initialfile=default_filename,
+                defaultextension=".wav",
+                filetypes=[("WAV files", "*.wav"), ("MP3 files", "*.mp3")],
+                title=self._tr("Save Morse Code Audio"))
+            
+            if filename:  # 用户没有取消对话框
+                # 确保文件保存在Output目录下
+                if not filename.startswith(output_dir):
+                    filename = os.path.join(output_dir, os.path.basename(filename))
+                
+                audio.export(filename, format=filename.split('.')[-1])
+                messagebox.showinfo(self._tr("Success"), 
+                                 f"{self._tr('Audio saved successfully')}\n{filename}")
+                
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Failed to save audio')}: {str(e)}")
+
+    def browse_audio_file(self):
+        """浏览音频文件"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("Audio files", "*.wav *.mp3"), ("All files", "*.*")])
+        if filename:
+            self.audio_file_var.set(filename)
+
+    def decode_morse_audio(self):
+        """从音频解码摩斯电码"""
+        audio_file = self.audio_file_var.get()
+        if not audio_file:
+            messagebox.showwarning(self._tr("Warning"), self._tr("No audio file selected"))
+            return
+        
+        try:
+            from pydub import AudioSegment
+            import numpy as np
+            
+            # 加载音频文件
+            audio = AudioSegment.from_file(audio_file)
+            
+            # 简单实现 - 需要更复杂的算法来实际解码摩斯电码
+            # 这里只是一个示例，实际解码需要更复杂的信号处理
+            
+            # 将音频转换为numpy数组
+            samples = np.array(audio.get_array_of_samples())
+            
+            # 检测音频活动
+            threshold = 0.1 * np.max(np.abs(samples))
+            active = np.abs(samples) > threshold
+            
+            # 简单的摩斯电码解码
+            morse_code = []
+            current_symbol = ''
+            last_state = False
+            silent_count = 0
+            
+            for is_active in active[::1000]:  # 降低采样率以提高性能
+                if is_active and not last_state:
+                    # 开始新符号
+                    if silent_count > 5:
+                        morse_code.append(' ')
+                    current_symbol = ''
+                elif is_active:
+                    current_symbol += '1'
+                
+                if not is_active and last_state:
+                    # 符号结束
+                    if len(current_symbol) > 0:
+                        if len(current_symbol) < 3:
+                            morse_code.append('.')
+                        else:
+                            morse_code.append('-')
+                    current_symbol = ''
+                
+                last_state = is_active
+                silent_count = 0 if is_active else silent_count + 1
+            
+            result = ''.join(morse_code)
+            self.morse_output.delete("1.0", tk.END)
+            self.morse_output.insert("1.0", result)
+            
+        except ImportError:
+            messagebox.showerror(self._tr("Error"), self._tr("Audio libraries not installed"))
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Failed to decode audio')}: {str(e)}")
+
+    def clear_morse_io(self):
+        """清空摩斯电码输入输出"""
+        self.morse_input.delete("1.0", tk.END)
+        self.morse_output.delete("1.0", tk.END)
 
     def _load_default_chinese(self):
         """默认中文语言包"""
@@ -105,8 +396,6 @@ class CryptoApp:
             "This program is still under development and testing": "本程序仍在改进测试中",
             "Import Language Pack": "导入语言包",
             "Apply Settings": "应用设置",
-            "Plugin Settings": "插件设置",
-            "Import Plugin": "导入插件",
             "Warning": "警告",
             "Success": "成功",
             "Error": "错误",
@@ -123,10 +412,6 @@ class CryptoApp:
             "Mapping saved successfully": "映射保存成功",
             "Failed to load mappings": "加载映射失败",
             "Failed to save mappings": "保存映射失败",
-            "Plugin imported successfully": "插件导入成功",
-            "Invalid plugin structure": "无效的插件结构",
-            "Plugin class not found": "未找到插件类",
-            "Failed to load plugin": "加载插件失败",
             "Language pack imported successfully": "语言包导入成功",
             "Invalid language pack format": "无效的语言包格式",
             "Failed to load language pack": "加载语言包失败",
@@ -134,16 +419,52 @@ class CryptoApp:
             "Failed to load history": "加载历史记录失败",
             "Failed to save settings": "保存设置失败",
             "Language changed. Please restart the program for full effect.": "语言已更改，请重启程序使更改完全生效",
-            "No plugin selected": "未选择插件",
-            "Confirm Uninstall": "确认卸载",
-            "Are you sure you want to uninstall plugin: {}?": "确定要卸载插件: {} 吗?",
-            "Plugin uninstalled successfully": "插件卸载成功",
-            "Failed to uninstall plugin": "卸载插件失败",
-            "Uninstall Plugin": "卸载插件",
             "Please enter a mapping name": "请输入映射名称",
             "Each mapping should be single character": "每个映射应为单个字符",
             "No valid mappings to save": "没有有效的映射可保存",
-            "Generate Random Mapping": "随机生成映射"
+            "Generate Random Mapping": "随机生成映射",
+            "File Embed Tool": "文件嵌入工具",
+            "File Selection": "文件选择",
+            "Outer File": "表文件:",
+            "Inner File": "里文件:",
+            "Mutation Parameters": "异变参数 (可选)",
+            "Show Mutation Parameters": "显示异变参数",
+            "Mutation Key": "异变密钥:",
+            "Generate Random Key": "生成随机密钥",
+            "Create Chimera File": "创建奇美拉文件",
+            "Clear Selection": "清空选择",
+            "File Extraction": "文件拆解",
+            "Select Chimera File": "选择奇美拉文件",
+            "Chimera File": "奇美拉文件:",
+            "Mutation Parameters (if used)": "异变参数 (如加密时使用过)",
+            "Extract Files": "拆解文件",
+            "Error": "错误",
+            "Please select both outer and inner files": "请同时选择表文件和里文件",
+            "Chimera file created successfully": "奇美拉文件创建成功!",
+            "Failed to create chimera file": "创建奇美拉文件失败",
+            "Please select chimera file": "请选择奇美拉文件",
+            "Invalid chimera file format": "无效的奇美拉文件格式",
+            "This file uses mutation parameters, please enter the correct mutation key": "此文件使用了异变参数，请输入正确的异变密钥",
+            "Decryption failed": "解密失败",
+            "Files extracted successfully": "文件拆解成功!",
+            "Failed to extract files": "拆解文件失败",
+            "Morse Code": "摩斯电码",
+            "Operation Mode": "操作模式",
+            "Text Mode": "文本模式",
+            "Audio Mode": "音频模式",
+            "Encrypt": "加密",
+            "Decrypt": "解密",
+            "Play Morse": "播放摩斯",
+            "Save Audio": "保存音频",
+            "Audio File": "音频文件:",
+            "Browse": "浏览",
+            "Decode Audio": "解码音频",
+            "No morse code to play": "没有可播放的摩斯电码",
+            "Audio saved successfully": "音频保存成功",
+            "Audio libraries not installed": "音频库未安装",
+            "Failed to save audio": "保存音频失败",
+            "No audio file selected": "未选择音频文件",
+            "Failed to decode audio": "解码音频失败"
         }
 
     def _load_default_english(self):
@@ -176,8 +497,6 @@ class CryptoApp:
             "This program is still under development and testing": "This program is still under development and testing",
             "Import Language Pack": "Import Language Pack",
             "Apply Settings": "Apply Settings",
-            "Plugin Settings": "Plugin Settings",
-            "Import Plugin": "Import Plugin",
             "Warning": "Warning",
             "Success": "Success",
             "Error": "Error",
@@ -194,10 +513,6 @@ class CryptoApp:
             "Mapping saved successfully": "Mapping saved successfully",
             "Failed to load mappings": "Failed to load mappings",
             "Failed to save mappings": "Failed to save mappings",
-            "Plugin imported successfully": "Plugin imported successfully",
-            "Invalid plugin structure": "Invalid plugin structure",
-            "Plugin class not found": "Plugin class not found",
-            "Failed to load plugin": "Failed to load plugin",
             "Language pack imported successfully": "Language pack imported successfully",
             "Invalid language pack format": "Invalid language pack format",
             "Failed to load language pack": "Failed to load language pack",
@@ -205,16 +520,52 @@ class CryptoApp:
             "Failed to load history": "Failed to load history",
             "Failed to save settings": "Failed to save settings",
             "Language changed. Please restart the program for full effect.": "Language changed. Please restart the program for full effect.",
-            "No plugin selected": "No plugin selected",
-            "Confirm Uninstall": "Confirm Uninstall",
-            "Are you sure you want to uninstall plugin: {}?": "Are you sure you want to uninstall plugin: {}?",
-            "Plugin uninstalled successfully": "Plugin uninstalled successfully",
-            "Failed to uninstall plugin": "Failed to uninstall plugin",
-            "Uninstall Plugin": "Uninstall Plugin",
             "Please enter a mapping name": "Please enter a mapping name",
             "Each mapping should be single character": "Each mapping should be single character",
             "No valid mappings to save": "No valid mappings to save",
-            "Generate Random Mapping": "Generate Random Mapping"
+            "Generate Random Mapping": "Generate Random Mapping",
+            "File Embed Tool": "File Embed Tool",
+            "File Selection": "File Selection",
+            "Outer File": "Outer File:",
+            "Inner File": "Inner File:",
+            "Mutation Parameters": "Mutation Parameters (optional)",
+            "Show Mutation Parameters": "Show Mutation Parameters",
+            "Mutation Key": "Mutation Key:",
+            "Generate Random Key": "Generate Random Key",
+            "Create Chimera File": "Create Chimera File",
+            "Clear Selection": "Clear Selection",
+            "File Extraction": "File Extraction",
+            "Select Chimera File": "Select Chimera File",
+            "Chimera File": "Chimera File:",
+            "Mutation Parameters (if used)": "Mutation Parameters (if used)",
+            "Extract Files": "Extract Files",
+            "Error": "Error",
+            "Please select both outer and inner files": "Please select both outer and inner files",
+            "Chimera file created successfully": "Chimera file created successfully!",
+            "Failed to create chimera file": "Failed to create chimera file",
+            "Please select chimera file": "Please select chimera file",
+            "Invalid chimera file format": "Invalid chimera file format",
+            "This file uses mutation parameters, please enter the correct mutation key": "This file uses mutation parameters, please enter the correct mutation key",
+            "Decryption failed": "Decryption failed",
+            "Files extracted successfully": "Files extracted successfully!",
+            "Failed to extract files": "Failed to extract files",
+            "Morse Code": "Morse Code",
+            "Operation Mode": "Operation Mode",
+            "Text Mode": "Text Mode",
+            "Audio Mode": "Audio Mode",
+            "Encrypt": "Encrypt",
+            "Decrypt": "Decrypt",
+            "Play Morse": "Play Morse",
+            "Save Audio": "Save Audio",
+            "Audio File": "Audio File:",
+            "Browse": "Browse",
+            "Decode Audio": "Decode Audio",
+            "No morse code to play": "No morse code to play",
+            "Audio saved successfully": "Audio saved successfully",
+            "Audio libraries not installed": "Audio libraries not installed",
+            "Failed to save audio": "Failed to save audio",
+            "No audio file selected": "No audio file selected",
+            "Failed to decode audio": "Failed to decode audio"
         }
         
     def _init_history_file(self):
@@ -254,14 +605,13 @@ class CryptoApp:
         
         # 创建必要目录
         os.makedirs(os.path.join(self.program_dir, "localization"), exist_ok=True)
-        os.makedirs(os.path.join(self.program_dir, "plugins"), exist_ok=True)
         
         # 初始化默认文件
         if not os.path.exists(os.path.join(self.program_dir, "settings.json")):
             with open(os.path.join(self.program_dir, "settings.json"), 'w', encoding='utf-8') as f:
                 json.dump({
                     "language": self.current_language,
-                    "window_size": "800x600",
+                    "window_size": "1280x720",  # 更新默认尺寸
                     "show_startup_hint": False
                 }, f)
 
@@ -280,11 +630,15 @@ class CryptoApp:
         """加载程序设置"""
         try:
             with open(os.path.join(self.program_dir, "settings.json"), 'r', encoding='utf-8') as f:
-                return json.load(f)
+                settings = json.load(f)
+                # 确保有窗口尺寸设置
+                if "window_size" not in settings:
+                    settings["window_size"] = "1280x720"
+                return settings
         except:
             return {
                 "language": self.current_language,
-                "window_size": "800x600",
+                "window_size": "1280x720",  # 默认尺寸
                 "show_startup_hint": False
             }
 
@@ -309,6 +663,10 @@ class CryptoApp:
         """凯撒密码标签页"""
         self.caesar_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.caesar_tab, text=self._tr("Caesar Cipher"))
+
+        # 调整框架的内边距
+        charset_frame = ttk.LabelFrame(self.caesar_tab, text=self._tr("Character Set"))
+        charset_frame.pack(fill="x", padx=15, pady=10)  # 增加内边距
         
         # 字符集选择
         charset_frame = ttk.LabelFrame(self.caesar_tab, text=self._tr("Character Set"))
@@ -415,38 +773,345 @@ class CryptoApp:
         ttk.Button(lang_frame, text=self._tr("Import Language Pack"),
                  command=self.import_language_pack).grid(row=1, column=0, columnspan=2, pady=5)
     
-        # 插件设置
-        plugin_frame = ttk.LabelFrame(self.settings_tab, text=self._tr("Plugin Settings"))
-        plugin_frame.pack(fill="x", padx=10, pady=5)
-        
-        # 单列布局防止重复
-        plugin_grid = ttk.Frame(plugin_frame)
-        plugin_grid.pack(fill="x")
-
-        # 导入按钮
-        ttk.Button(plugin_grid, text=self._tr("Import Plugin"),
-                 command=self.import_plugin).grid(row=0, column=0, pady=5, sticky="w")
-
-        # 插件选择下拉框
-        self.plugin_var = tk.StringVar()
-        self.plugin_list_widget = ttk.Combobox(plugin_grid, 
-                                            textvariable=self.plugin_var, 
-                                            state="readonly")
-        self.plugin_list_widget.grid(row=1, column=0, pady=5, sticky="ew")
-        
-        # 卸载按钮 (确保只有一个)
-        ttk.Button(plugin_grid, text=self._tr("Uninstall Plugin"),
-                 command=lambda: self.uninstall_plugin(self.plugin_list_widget)).grid(row=2, column=0, pady=5, sticky="w")
-
-        # 配置网格列权重
-        plugin_grid.columnconfigure(0, weight=1)
-        
-        # 初始化列表
-        self._update_plugin_list(self.plugin_list_widget)
-    
         # 应用按钮
         ttk.Button(self.settings_tab, text=self._tr("Apply Settings"),
                  command=self.apply_settings).pack(pady=10)
+
+        # 创建摩斯电码标签页
+        self._setup_morse_tab()
+
+    def _setup_file_embed_tab(self):
+        """文件嵌入工具标签页"""
+        self.file_embed_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.file_embed_tab, text=self._tr("File Embed Tool"))
+        
+        # 创建标签页
+        self.file_embed_notebook = ttk.Notebook(self.file_embed_tab)
+        self.file_embed_notebook.pack(fill="both", expand=True)
+        
+        # 创建文件嵌入标签页
+        self._create_embed_tab()
+        
+        # 创建文件拆解标签页
+        self._create_extract_tab()
+    
+    def _create_embed_tab(self):
+        """创建文件嵌入标签页"""
+        embed_tab = ttk.Frame(self.file_embed_notebook)
+        self.file_embed_notebook.add(embed_tab, text=self._tr("File Embed"))
+        
+        # 文件选择区域
+        file_frame = ttk.LabelFrame(embed_tab, text=self._tr("File Selection"))
+        file_frame.pack(fill="x", padx=5, pady=5)
+        
+        # 表文件选择
+        ttk.Label(file_frame, text=self._tr("Outer File")).grid(row=0, column=0, sticky="w")
+        self.outer_file_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.outer_file_var, width=40).grid(row=0, column=1, padx=5)
+        ttk.Button(file_frame, text="...", command=self._browse_outer_file).grid(row=0, column=2)
+        
+        # 里文件选择
+        ttk.Label(file_frame, text=self._tr("Inner File")).grid(row=1, column=0, sticky="w")
+        self.inner_file_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.inner_file_var, width=40).grid(row=1, column=1, padx=5)
+        ttk.Button(file_frame, text="...", command=self._browse_inner_file).grid(row=1, column=2)
+        
+        # 异变参数设置
+        self.mutation_frame = ttk.LabelFrame(embed_tab, text=self._tr("Mutation Parameters"))
+        self.mutation_frame.pack(fill="x", padx=5, pady=5)
+        
+        # 显示/隐藏复选框
+        self.show_key_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.mutation_frame, text=self._tr("Show Mutation Parameters"), 
+                       variable=self.show_key_var, 
+                       command=self.toggle_key_visibility).grid(row=0, column=0, sticky="w", columnspan=3)
+        
+        ttk.Label(self.mutation_frame, text=self._tr("Mutation Key")).grid(row=1, column=0, sticky="w")
+        self.mutation_key_var = tk.StringVar()
+        self.key_entry = ttk.Entry(self.mutation_frame, textvariable=self.mutation_key_var, 
+                                 show="*", width=30)
+        self.key_entry.grid(row=1, column=1, sticky="w")
+        
+        ttk.Button(self.mutation_frame, text=self._tr("Generate Random Key"), 
+                  command=self._generate_random_key).grid(row=1, column=2, padx=5)
+        
+        # 操作按钮
+        button_frame = ttk.Frame(embed_tab)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text=self._tr("Create Chimera File"), command=self.create_chimera).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Clear Selection"), command=self.clear_files).pack(side="left", padx=5)
+        
+        # 状态显示
+        self.status_var = tk.StringVar()
+        ttk.Label(embed_tab, textvariable=self.status_var).pack(pady=5)
+        
+    def _create_extract_tab(self):
+        """创建文件拆解标签页"""
+        extract_tab = ttk.Frame(self.file_embed_notebook)
+        self.file_embed_notebook.add(extract_tab, text=self._tr("File Extraction"))
+        
+        # 文件选择区域
+        file_frame = ttk.LabelFrame(extract_tab, text=self._tr("Select Chimera File"))
+        file_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(file_frame, text=self._tr("Chimera File")).grid(row=0, column=0, sticky="w")
+        self.chimera_file_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.chimera_file_var, width=40).grid(row=0, column=1, padx=5)
+        ttk.Button(file_frame, text="...", command=self._browse_chimera_file).grid(row=0, column=2)
+        
+        # 异变参数设置
+        self.extract_mutation_frame = ttk.LabelFrame(extract_tab, text=self._tr("Mutation Parameters (if used)"))
+        self.extract_mutation_frame.pack(fill="x", padx=5, pady=5)
+        
+        # 显示/隐藏复选框
+        self.extract_show_key_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.extract_mutation_frame, text=self._tr("Show Mutation Parameters"), 
+                       variable=self.extract_show_key_var, 
+                       command=self.toggle_extract_key_visibility).grid(row=0, column=0, sticky="w", columnspan=3)
+        
+        ttk.Label(self.extract_mutation_frame, text=self._tr("Mutation Key")).grid(row=1, column=0, sticky="w")
+        self.extract_key_var = tk.StringVar()
+        self.extract_key_entry = ttk.Entry(self.extract_mutation_frame, 
+                                         textvariable=self.extract_key_var, 
+                                         show="*", width=30)
+        self.extract_key_entry.grid(row=1, column=1, sticky="w")
+        
+        # 操作按钮
+        button_frame = ttk.Frame(extract_tab)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text=self._tr("Extract Files"), command=self.extract_files).pack(side="left", padx=5)
+        
+        # 状态显示
+        self.extract_status_var = tk.StringVar()
+        ttk.Label(extract_tab, textvariable=self.extract_status_var).pack(pady=5)
+        
+    def toggle_key_visibility(self):
+        """切换密钥可见性"""
+        show = self.show_key_var.get()
+        self.key_entry.config(show="" if show else "*")
+        
+    def toggle_extract_key_visibility(self):
+        """切换拆解密钥可见性"""
+        show = self.extract_show_key_var.get()
+        self.extract_key_entry.config(show="" if show else "*")
+        
+    def _browse_outer_file(self):
+        """选择表文件"""
+        filename = filedialog.askopenfilename(title=self._tr("Select Outer File"))
+        if filename:
+            self.outer_file_var.set(filename)
+            self.status_var.set(f"{self._tr('Outer File')}: {os.path.basename(filename)}")
+            
+    def _browse_inner_file(self):
+        """选择里文件"""
+        filename = filedialog.askopenfilename(title=self._tr("Select Inner File"))
+        if filename:
+            self.inner_file_var.set(filename)
+            self.status_var.set(f"{self._tr('Inner File')}: {os.path.basename(filename)}")
+            
+    def _browse_chimera_file(self):
+        """选择奇美拉文件"""
+        filename = filedialog.askopenfilename(title=self._tr("Select Chimera File"))
+        if filename:
+            self.chimera_file_var.set(filename)
+            self.extract_status_var.set(f"{self._tr('Chimera File')}: {os.path.basename(filename)}")
+            
+    def _generate_random_key(self):
+        """生成随机异变密钥"""
+        key = secrets.token_hex(16)
+        self.mutation_key_var.set(key)
+        self.status_var.set(self._tr("Random mutation key generated"))
+            
+    def clear_files(self):
+        """清空已选文件"""
+        self.outer_file_var.set("")
+        self.inner_file_var.set("")
+        self.mutation_key_var.set("")
+        self.status_var.set(self._tr("Selection cleared"))
+        
+    def create_chimera(self):
+        """创建奇美拉文件"""
+        outer_file = self.outer_file_var.get()
+        inner_file = self.inner_file_var.get()
+        
+        if not outer_file or not inner_file:
+            messagebox.showerror(self._tr("Error"), self._tr("Please select both outer and inner files"))
+            return
+            
+        try:
+            # 读取两个文件
+            with open(outer_file, 'rb') as f:
+                outer_data = f.read()
+                outer_name = os.path.basename(outer_file)
+                
+            with open(inner_file, 'rb') as f:
+                inner_data = f.read()
+                inner_name = os.path.basename(inner_file)
+                
+            # 获取异变密钥
+            mutation_key = self.mutation_key_var.get().encode('utf-8') if self.mutation_key_var.get() else None
+            
+            # 如果提供了异变密钥，则加密文件数据
+            if mutation_key:
+                outer_data = self._mutate_data(outer_data, mutation_key)
+                inner_data = self._mutate_data(inner_data, mutation_key)
+                
+            # 创建输出文件名
+            output_file = filedialog.asksaveasfilename(
+                defaultextension=".chimera",
+                filetypes=[(self._tr("Chimera files"), "*.chimera"), (self._tr("All files"), "*.*")],
+                title=self._tr("Save Chimera File")
+            )
+            
+            if not output_file:
+                return  # 用户取消
+                
+            # 创建奇美拉文件
+            self._create_chimera_file(
+                output_file, 
+                outer_data, inner_data,
+                outer_name, inner_name,
+                bool(mutation_key)
+            )
+            
+            self.status_var.set(f"{self._tr('Chimera file created successfully')}: {os.path.basename(output_file)}")
+            messagebox.showinfo(self._tr("Success"), self._tr("Chimera file created successfully"))
+            
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Failed to create chimera file')}: {str(e)}")
+            self.status_var.set(self._tr("Failed to create chimera file"))
+            
+    def _mutate_data(self, data, key):
+        """使用异变密钥加密数据"""
+        # 使用SHA256哈希密钥生成AES密钥
+        aes_key = hashlib.sha256(key).digest()[:32]
+        cipher = AES.new(aes_key, AES.MODE_CBC)
+        ct_bytes = cipher.encrypt(pad(data, AES.block_size))
+        return cipher.iv + ct_bytes
+        
+    def _create_chimera_file(self, output_path, outer_data, inner_data, outer_name, inner_name, mutated):
+        """
+        创建奇美拉文件格式:
+        - 8字节: 魔数 'CHIMERA\x00'
+        - 1字节: 版本号 (当前为2)
+        - 1字节: 是否使用异变 (0或1)
+        - 2字节: 表文件名长度 (N)
+        - N字节: 表文件名
+        - 2字节: 里文件名长度 (M)
+        - M字节: 里文件名
+        - 8字节: 表文件大小
+        - 8字节: 里文件大小
+        - 表文件数据
+        - 里文件数据
+        """
+        with open(output_path, 'wb') as f:
+            # 写入文件头
+            f.write(b'CHIMERA\x00')  # 魔数
+            f.write(bytes([2]))     # 版本号
+            f.write(bytes([1 if mutated else 0]))  # 异变标志
+            
+            # 写入文件名
+            outer_name_bytes = outer_name.encode('utf-8')
+            inner_name_bytes = inner_name.encode('utf-8')
+            
+            f.write(len(outer_name_bytes).to_bytes(2, 'little'))  # 表文件名长度
+            f.write(outer_name_bytes)  # 表文件名
+            
+            f.write(len(inner_name_bytes).to_bytes(2, 'little'))  # 里文件名长度
+            f.write(inner_name_bytes)  # 里文件名
+            
+            # 写入文件大小
+            f.write(len(outer_data).to_bytes(8, 'little'))  # 表文件大小
+            f.write(len(inner_data).to_bytes(8, 'little'))  # 里文件大小
+            
+            # 写入文件数据
+            f.write(outer_data)
+            f.write(inner_data)
+            
+    def extract_files(self):
+        """拆解奇美拉文件"""
+        chimera_file = self.chimera_file_var.get()
+        if not chimera_file:
+            messagebox.showerror(self._tr("Error"), self._tr("Please select chimera file"))
+            return
+            
+        try:
+            # 读取奇美拉文件
+            with open(chimera_file, 'rb') as f:
+                header = f.read(8)
+                if header != b'CHIMERA\x00':
+                    raise ValueError(self._tr("Invalid chimera file format"))
+                    
+                version = int.from_bytes(f.read(1), 'little')
+                mutated = bool(int.from_bytes(f.read(1), 'little'))
+                
+                # 读取文件名
+                outer_name_len = int.from_bytes(f.read(2), 'little')
+                outer_name = f.read(outer_name_len).decode('utf-8')
+                
+                inner_name_len = int.from_bytes(f.read(2), 'little')
+                inner_name = f.read(inner_name_len).decode('utf-8')
+                
+                # 读取文件大小
+                outer_size = int.from_bytes(f.read(8), 'little')
+                inner_size = int.from_bytes(f.read(8), 'little')
+                
+                # 读取文件数据
+                outer_data = f.read(outer_size)
+                inner_data = f.read(inner_size)
+                
+            # 如果文件使用了异变参数，需要解密
+            if mutated:
+                mutation_key = self.extract_key_var.get().encode('utf-8') if self.extract_key_var.get() else None
+                if not mutation_key:
+                    messagebox.showerror(self._tr("Error"), 
+                                       self._tr("This file uses mutation parameters, please enter the correct mutation key"))
+                    return
+                    
+                try:
+                    outer_data = self._demutate_data(outer_data, mutation_key)
+                    inner_data = self._demutate_data(inner_data, mutation_key)
+                except Exception as e:
+                    messagebox.showerror(self._tr("Error"), 
+                                       f"{self._tr('Decryption failed')}: {str(e)}\n{self._tr('May be incorrect mutation key')}")
+                    return
+                    
+            # 创建输出目录
+            output_dir = os.path.join(self.program_dir, "Output")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 保存表文件
+            outer_path = os.path.join(output_dir, outer_name)
+            with open(outer_path, 'wb') as f:
+                f.write(outer_data)
+                
+            # 保存里文件
+            inner_path = os.path.join(output_dir, inner_name)
+            with open(inner_path, 'wb') as f:
+                f.write(inner_data)
+                
+            self.extract_status_var.set(f"{self._tr('Files extracted successfully, saved in')}: {output_dir}")
+            messagebox.showinfo(self._tr("Success"), 
+                              f"{self._tr('Files extracted successfully')}!\n{self._tr('Outer File')}: {outer_name}\n{self._tr('Inner File')}: {inner_name}")
+            
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), 
+                               f"{self._tr('Failed to extract files')}: {str(e)}")
+            self.extract_status_var.set(self._tr("Failed to extract files"))
+            
+    def _demutate_data(self, data, key):
+        """使用异变密钥解密数据"""
+        # 分离IV和加密数据
+        iv = data[:16]
+        ct = data[16:]
+        
+        # 使用SHA256哈希密钥生成AES密钥
+        aes_key = hashlib.sha256(key).digest()[:32]
+        cipher = AES.new(aes_key, AES.MODE_CBC, iv=iv)
+        pt = unpad(cipher.decrypt(ct), AES.block_size)
+        return pt
 
     def execute_caesar(self):
         """执行凯撒加密/解密"""
@@ -597,18 +1262,18 @@ class CryptoApp:
         table_frame = ttk.Frame(main_frame)
         table_frame.pack(fill="both", expand=True)
         
-        # 滚动区域
-        canvas = tk.Canvas(table_frame)
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
+        # 创建滚动区域
+        scrollbar = ttk.Scrollbar(table_frame)
         scrollbar.pack(side="right", fill="y")
+        
+        # 使用Text部件代替Canvas来实现滚动
+        text_widget = tk.Text(table_frame, yscrollcommand=scrollbar.set, wrap="none")
+        text_widget.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=text_widget.yview)
+        
+        # 在Text部件中嵌入Frame
+        scrollable_frame = ttk.Frame(text_widget)
+        text_widget.window_create("1.0", window=scrollable_frame)
         
         # 动态添加映射行
         self.mapping_entries = []
@@ -666,7 +1331,9 @@ class CryptoApp:
         ttk.Entry(row_frame, textvariable=mapped_var, width=15).pack(side="left", padx=2)
         
         self.mapping_entries.append((orig_var, mapped_var))
-        parent_frame.master.master.yview_moveto(1.0)  # 滚动到底部
+        
+        # 更新滚动区域
+        parent_frame.master.see("end")  # 滚动到底部
     
     def _load_existing_mapping(self, name_var, scrollable_frame):
         """加载现有映射"""
@@ -810,7 +1477,11 @@ class CryptoApp:
             self.settings["language"] = new_lang
             self._save_settings()
             self._update_ui_language()
-            messagebox.showinfo(self._tr("Success"), self._tr("Language changed. Please restart the program for full effect."))
+            messagebox.showinfo(self._tr("Success"), 
+                              self._tr("Language changed. Please restart the program for full effect."))
+        # 应用窗口尺寸设置
+        if "window_size" in self.settings:
+            self.root.geometry(self.settings["window_size"])
 
     def _save_settings(self):
         """保存设置到文件"""
@@ -859,139 +1530,6 @@ class CryptoApp:
                 messagebox.showerror(self._tr("Error"), 
                                    f"{self._tr('Failed to load language pack')}: {str(e)}")
 
-    def import_plugin(self):
-        """导入用户插件"""
-        filename = filedialog.askopenfilename(
-            filetypes=[("Python files", "*.py"), ("All files", "*.*")])
-        
-        if filename:
-            try:
-                # 复制插件到plugins目录
-                plugin_name = os.path.splitext(os.path.basename(filename))[0]
-                dest_file = os.path.join(self.program_dir, "plugins", f"{plugin_name}.py")
-                
-                # 如果是新文件或不同位置的文件才复制
-                if not os.path.exists(dest_file) or not os.path.samefile(filename, dest_file):
-                    with open(filename, 'r', encoding='utf-8') as src, \
-                         open(dest_file, 'w', encoding='utf-8') as dst:
-                        dst.write(src.read())
-                
-                # 加载插件
-                spec = importlib.util.spec_from_file_location(plugin_name, dest_file)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                
-                if hasattr(module, "Plugin"):
-                    plugin_class = module.Plugin
-                    if inspect.isclass(plugin_class):
-                        plugin_instance = plugin_class(self)
-                        self.plugins[plugin_name] = plugin_instance
-                        
-                        plugin_tab = ttk.Frame(self.notebook)
-                        self.notebook.add(plugin_tab, text=plugin_name)
-                        
-                        if hasattr(plugin_instance, "setup_ui"):
-                            plugin_instance.setup_ui(plugin_tab)
-                        
-                        messagebox.showinfo(self._tr("Success"), 
-                                          self._tr("Plugin imported successfully"))
-                    else:
-                        messagebox.showerror(self._tr("Error"), 
-                                           self._tr("Invalid plugin structure"))
-                else:
-                    messagebox.showerror(self._tr("Error"), 
-                                       self._tr("Plugin class not found"))
-            except Exception as e:
-                messagebox.showerror(self._tr("Error"), 
-                                   f"{self._tr('Failed to load plugin')}: {str(e)}")
-
-    def _load_builtin_plugins(self):
-        """加载内置插件"""
-        plugins_dir = os.path.join(self.program_dir, "plugins")
-        if os.path.exists(plugins_dir):
-            for filename in os.listdir(plugins_dir):
-                if filename.endswith('.py') and filename != "example_plugin.py":
-                    try:
-                        plugin_name = os.path.splitext(filename)[0]
-                        spec = importlib.util.spec_from_file_location(
-                            plugin_name, os.path.join(plugins_dir, filename))
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
-                        
-                        if hasattr(module, "Plugin"):
-                            plugin_class = module.Plugin
-                            if inspect.isclass(plugin_class):
-                                plugin_instance = plugin_class(self)
-                                self.plugins[plugin_name] = plugin_instance
-                                
-                                # 添加插件标签页（但不立即显示）
-                                plugin_tab = ttk.Frame(self.notebook)
-                                self.notebook.add(plugin_tab, text=plugin_name)
-                                
-                                if hasattr(plugin_instance, "setup_ui"):
-                                    plugin_instance.setup_ui(plugin_tab)
-                                
-                                # 刷新列表但不切换页面
-                                if hasattr(self, 'plugin_list_widget'):
-                                    self._update_plugin_list(self.plugin_list_widget)
-                    except Exception as e:
-                        print(f"加载插件 {filename} 失败: {str(e)}")
-        
-        # 加载完成后确保设置页在最前
-        self.notebook.select(0)
-                        
-    def _update_plugin_list(self, combobox):
-        """更新插件下拉列表"""
-        plugins = list(self.plugins.keys())
-        combobox['values'] = plugins
-        if plugins:
-            combobox.current(0)
-        else:
-            self.plugin_var.set("")  # 清空选择
-
-    def uninstall_plugin(self, plugin_list):
-        """卸载选中的插件"""
-        if not hasattr(self, 'plugin_list_widget'):
-            return
-                
-        plugin_name = self.plugin_var.get()
-        if not plugin_name:
-            messagebox.showwarning(self._tr("Warning"), self._tr("No plugin selected"))
-            return
-        
-        # 二次确认
-        if not messagebox.askyesno(
-            self._tr("Confirm Uninstall"),
-            self._tr("Are you sure you want to uninstall plugin: {}?").format(plugin_name)
-        ):
-            return
-        
-        try:
-            # 从界面移除
-            for i in range(self.notebook.index("end")):
-                if self.notebook.tab(i, "text") == plugin_name:
-                    self.notebook.forget(i)
-                    break
-            
-            # 从内存移除
-            if plugin_name in self.plugins:
-                del self.plugins[plugin_name]
-            
-            # 从磁盘删除
-            plugin_file = os.path.join(self.program_dir, "plugins", f"{plugin_name}.py")
-            if os.path.exists(plugin_file):
-                os.remove(plugin_file)
-            
-            # 更新列表
-            self._update_plugin_list(plugin_list)
-            messagebox.showinfo(self._tr("Success"), 
-                              self._tr("Plugin uninstalled successfully"))
-        except Exception as e:
-            messagebox.showerror(self._tr("Error"), 
-                               f"{self._tr('Failed to uninstall plugin')}: {str(e)}")
-            
-        self._update_plugin_list(self.plugin_list_widget)
-        
 def main():
     """Main entry point for the application"""
     root = tk.Tk()
