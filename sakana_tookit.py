@@ -5,6 +5,7 @@ import os
 import sys
 import locale
 from datetime import datetime
+from datetime import timedelta
 import random
 import string
 import struct
@@ -12,6 +13,11 @@ import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import secrets
+import base64
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Hash import SHA256
+from OpenSSL import crypto
 
 class CryptoApp:
     def __init__(self, root):
@@ -97,6 +103,433 @@ class CryptoApp:
         }
         # 反向字典
         self.reverse_morse_dict = {v: k for k, v in self.morse_code_dict.items()}
+
+            # 签名相关变量
+        self.signatures = {}  # 存储加载的签名
+        self.current_signature = None
+        
+        # 确保signature目录存在
+        self._init_signature_directory()
+        
+        # 在初始化标签页的部分添加：
+        # 创建签名加密分发标签页
+        self._setup_signature_tab()
+
+    def _init_signature_directory(self):
+        """初始化签名目录"""
+        signature_dir = os.path.join(self.program_dir, "signature")
+        os.makedirs(signature_dir, exist_ok=True)
+        output_dir = os.path.join(self.program_dir, "output")
+        os.makedirs(output_dir, exist_ok=True)
+
+    def _browse_sig_file(self):
+        """浏览签名加密文件"""
+        filename = filedialog.askopenfilename(
+            title=self._tr("Select File for Signature Operation"),
+            filetypes=[("All files", "*.*")]
+        )
+        if filename:
+            self.sig_file_var.set(filename)
+
+    def _setup_signature_tab(self):
+        """设置签名加密分发标签页"""
+        self.signature_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.signature_tab, text=self._tr("Signature Crypto"))
+        
+        # 创建子标签页
+        self.signature_notebook = ttk.Notebook(self.signature_tab)
+        self.signature_notebook.pack(fill="both", expand=True)
+        
+        # 创建分发/提取页面
+        self._setup_signature_distribution_tab()
+        
+        # 创建数字签名预配置页面
+        self._setup_signature_config_tab()
+        
+        # 加载已有签名
+        self._load_signatures()
+
+    def _setup_signature_config_tab(self):
+        """数字证书预配置页面"""
+        config_tab = ttk.Frame(self.signature_notebook)
+        self.signature_notebook.add(config_tab, text=self._tr("Certificate Config"))
+        
+        # 签发人信息
+        issuer_frame = ttk.LabelFrame(config_tab, text=self._tr("Issuer Info"))
+        issuer_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(issuer_frame, text=self._tr("Issuer Name:")).grid(row=0, column=0, sticky="w")
+        self.issuer_name_var = tk.StringVar()
+        ttk.Entry(issuer_frame, textvariable=self.issuer_name_var).grid(row=0, column=1, sticky="ew")
+        
+        ttk.Label(issuer_frame, text=self._tr("Organization:")).grid(row=1, column=0, sticky="w")
+        self.organization_var = tk.StringVar()
+        ttk.Entry(issuer_frame, textvariable=self.organization_var).grid(row=1, column=1, sticky="ew")
+        
+        ttk.Label(issuer_frame, text=self._tr("Email:")).grid(row=2, column=0, sticky="w")
+        self.email_var = tk.StringVar()
+        ttk.Entry(issuer_frame, textvariable=self.email_var).grid(row=2, column=1, sticky="ew")
+        
+        ttk.Label(issuer_frame, text=self._tr("Issue Date:")).grid(row=3, column=0, sticky="w")
+        self.issue_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        ttk.Entry(issuer_frame, textvariable=self.issue_date_var, state="readonly").grid(row=3, column=1, sticky="ew")
+        
+        ttk.Label(issuer_frame, text=self._tr("Expiry Date:")).grid(row=4, column=0, sticky="w")
+        self.expiry_date_var = tk.StringVar(value=(datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d"))
+        ttk.Entry(issuer_frame, textvariable=self.expiry_date_var).grid(row=4, column=1, sticky="ew")
+        
+        # 密钥设置
+        key_frame = ttk.LabelFrame(config_tab, text=self._tr("Key Settings"))
+        key_frame.pack(fill="x", padx=10, pady=5)
+        
+        # 密钥长度选择
+        ttk.Label(key_frame, text=self._tr("Key Length:")).grid(row=0, column=0, sticky="w")
+        self.key_length_var = tk.StringVar(value="2048")
+        ttk.Combobox(key_frame, textvariable=self.key_length_var, 
+                    values=["1024", "2048", "4096"], state="readonly").grid(row=0, column=1, sticky="w")
+        
+        # 生成密钥对按钮
+        ttk.Button(key_frame, text=self._tr("Generate Key Pair"), 
+                  command=self._generate_key_pair).grid(row=0, column=2, padx=5)
+        
+        # 公钥显示
+        ttk.Label(key_frame, text=self._tr("Public Key:")).grid(row=1, column=0, sticky="w")
+        self.public_key_text = tk.Text(key_frame, height=4, wrap="word", font=('Courier', 8))
+        self.public_key_text.grid(row=2, column=0, columnspan=3, sticky="ew")
+        
+        # 私钥显示
+        ttk.Label(key_frame, text=self._tr("Private Key:")).grid(row=3, column=0, sticky="w")
+        self.private_key_text = tk.Text(key_frame, height=4, wrap="word", font=('Courier', 8))
+        self.private_key_text.grid(row=4, column=0, columnspan=3, sticky="ew")
+        
+        # 操作按钮
+        button_frame = ttk.Frame(config_tab)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text=self._tr("Generate Certificate"), 
+                  command=self._generate_certificate).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Load Certificate"), 
+                  command=self._load_certificate_file).pack(side="left", padx=5)
+
+    def _setup_signature_distribution_tab(self):
+        """分发/提取页面"""
+        dist_tab = ttk.Frame(self.signature_notebook)
+        self.signature_notebook.add(dist_tab, text=self._tr("Distribution/Extraction"))
+        
+        # 签名选择
+        sig_frame = ttk.LabelFrame(dist_tab, text=self._tr("Select Signature"))
+        sig_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(sig_frame, text=self._tr("Available Signatures:")).grid(row=0, column=0, sticky="w")
+        self.signature_var = tk.StringVar()
+        self.signature_combobox = ttk.Combobox(sig_frame, textvariable=self.signature_var, state="readonly")
+        self.signature_combobox.grid(row=0, column=1, sticky="ew")
+        
+        # 文件操作
+        file_frame = ttk.LabelFrame(dist_tab, text=self._tr("File Operation"))
+        file_frame.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(file_frame, text=self._tr("Select File:")).grid(row=0, column=0, sticky="w")
+        self.sig_file_var = tk.StringVar()
+        ttk.Entry(file_frame, textvariable=self.sig_file_var, width=40).grid(row=0, column=1, sticky="ew")
+        ttk.Button(file_frame, text="...", command=self._browse_sig_file).grid(row=0, column=2)
+        
+        # 操作按钮
+        button_frame = ttk.Frame(dist_tab)
+        button_frame.pack(pady=10)
+        
+        ttk.Button(button_frame, text=self._tr("Encrypt File"), 
+                  command=self._encrypt_with_signature).pack(side="left", padx=5)
+        ttk.Button(button_frame, text=self._tr("Decrypt File"), 
+                  command=self._decrypt_with_signature).pack(side="left", padx=5)
+
+    def _generate_key_pair(self):
+        """生成RSA密钥对"""
+        try:
+            key_length = int(self.key_length_var.get())
+            key = RSA.generate(key_length)
+            
+            # 获取PEM格式的密钥
+            private_key = key.export_key()
+            public_key = key.publickey().export_key()
+            
+            # 显示在文本框中
+            self.private_key_text.delete("1.0", tk.END)
+            self.private_key_text.insert("1.0", private_key.decode())
+            
+            self.public_key_text.delete("1.0", tk.END)
+            self.public_key_text.insert("1.0", public_key.decode())
+            
+            messagebox.showinfo(self._tr("Success"), self._tr("Key pair generated successfully"))
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), f"{self._tr('Failed to generate key pair')}: {str(e)}")
+
+    def _load_signatures(self):
+        """加载已有签名"""
+        signature_dir = os.path.join(self.program_dir, "signature")
+        self.signatures = {}
+        
+        for file in os.listdir(signature_dir):
+            if file.endswith('.sig'):
+                try:
+                    with open(os.path.join(signature_dir, file), 'rb') as f:
+                        signature_data = json.load(f)
+                        self.signatures[file] = signature_data
+                except:
+                    continue
+        
+        self.signature_combobox['values'] = list(self.signatures.keys())
+
+    def _generate_certificate(self):
+        """生成数字证书"""
+        issuer_name = self.issuer_name_var.get()
+        if not issuer_name:
+            messagebox.showerror(self._tr("Error"), self._tr("Issuer name cannot be empty"))
+            return
+        
+        private_key_pem = self.private_key_text.get("1.0", tk.END).strip()
+        if not private_key_pem:
+            messagebox.showerror(self._tr("Error"), self._tr("Private key is empty"))
+            return
+        
+        try:
+            # 创建证书
+            key = crypto.load_privatekey(crypto.FILETYPE_PEM, private_key_pem)
+            
+            # 创建X.509证书
+            cert = crypto.X509()
+            
+            # 设置证书主题
+            cert.get_subject().CN = issuer_name
+            cert.get_subject().O = self.organization_var.get()
+            cert.get_subject().emailAddress = self.email_var.get()
+            
+            # 设置颁发者(自签名)
+            cert.set_issuer(cert.get_subject())
+            
+            # 设置有效期
+            cert.set_notBefore(datetime.now().strftime("%Y%m%d%H%M%SZ").encode())
+            cert.set_notAfter((datetime.now() + timedelta(days=365)).strftime("%Y%m%d%H%M%SZ").encode())
+            
+            # 设置序列号
+            cert.set_serial_number(random.randint(0, 2**64))
+            
+            # 添加公钥
+            cert.set_pubkey(key)
+            
+            # 签名证书
+            cert.sign(key, "sha256")
+            
+            # 生成两层加密密钥
+            aes_key = secrets.token_bytes(32)  # AES-256 key
+            base64_key = base64.b64encode(secrets.token_bytes(32)).decode()  # Optional base64 key
+            
+            # 将密钥添加到证书扩展中
+            aes_ext = crypto.X509Extension(b'aesKey', False, aes_key)
+            cert.add_extensions([aes_ext])
+            
+            # 保存证书到文件
+            output_dir = os.path.join(self.program_dir, "output")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            filename = f"certificate_{issuer_name}.pem"
+            filepath = os.path.join(output_dir, filename)
+            
+            # 保存证书和密钥
+            with open(filepath, 'wb') as f:
+                f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+                f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, key))
+                # 添加加密密钥信息
+                f.write(b'\n--- AES KEY ---\n')
+                f.write(base64.b64encode(aes_key))
+                f.write(b'\n--- BASE64 KEY ---\n')
+                f.write(base64_key.encode())
+            
+            # 添加到证书列表
+            self._load_certificates()
+            
+            messagebox.showinfo(self._tr("Success"), 
+                             f"{self._tr('Certificate generated successfully')}\n{filepath}")
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), 
+                               f"{self._tr('Failed to generate certificate')}: {str(e)}")
+
+    def _load_certificate_file(self):
+        """加载证书文件"""
+        filename = filedialog.askopenfilename(
+            filetypes=[("Certificate files", "*.pem *.crt"), ("All files", "*.*")],
+            title=self._tr("Select Certificate File"))
+        
+        if filename:
+            try:
+                # 读取证书文件
+                with open(filename, 'rb') as f:
+                    cert_data = f.read()
+                
+                # 验证证书格式
+                try:
+                    cert = crypto.load_certificate(crypto.FILETYPE_PEM, cert_data)
+                except:
+                    # 如果不是证书文件，可能是包含私钥的文件
+                    cert = None
+                
+                # 复制到certificate目录
+                basename = os.path.basename(filename)
+                dest_path = os.path.join(self.program_dir, "signature", basename)
+                
+                with open(dest_path, 'wb') as f:
+                    f.write(cert_data)
+                
+                # 重新加载证书
+                self._load_certificates()
+                messagebox.showinfo(self._tr("Success"), self._tr("Certificate loaded successfully"))
+            except Exception as e:
+                messagebox.showerror(self._tr("Error"), 
+                                   f"{self._tr('Failed to load certificate')}: {str(e)}")
+
+    def _load_certificates(self):
+        """加载已有证书"""
+        signature_dir = os.path.join(self.program_dir, "signature")
+        self.signatures = {}
+        
+        for file in os.listdir(signature_dir):
+            if file.endswith(('.pem', '.crt')):
+                try:
+                    with open(os.path.join(signature_dir, file), 'rb') as f:
+                        cert_data = f.read()
+                    
+                    # 尝试加载证书
+                    try:
+                        cert = crypto.load_certificate(crypto.FILETYPE_PEM, cert_data)
+                        subject = cert.get_subject()
+                        issuer = {
+                            'file': file,
+                            'subject': {
+                                'CN': subject.CN,
+                                'O': subject.O,
+                                'emailAddress': subject.emailAddress
+                            },
+                            'notBefore': cert.get_notBefore(),
+                            'notAfter': cert.get_notAfter(),
+                            'serial': cert.get_serial_number(),
+                            'data': cert_data
+                        }
+                        self.signatures[file] = issuer
+                    except:
+                        # 如果不是证书文件，可能是包含私钥的文件
+                        try:
+                            key = crypto.load_privatekey(crypto.FILETYPE_PEM, cert_data)
+                            self.signatures[file] = {
+                                'file': file,
+                                'key': key,
+                                'data': cert_data
+                            }
+                        except:
+                            continue
+                except:
+                    continue
+        
+        # 更新下拉列表
+        self.signature_combobox['values'] = list(self.signatures.keys())
+
+    def _encrypt_with_signature(self):
+        """使用证书加密文件"""
+        if not self.signatures:
+            messagebox.showerror(self._tr("Error"), self._tr("No certificates available"))
+            return
+        
+        selected_sig = self.signature_var.get()
+        if not selected_sig:
+            messagebox.showerror(self._tr("Error"), self._tr("Please select a certificate"))
+            return
+        
+        filepath = self.sig_file_var.get()
+        if not filepath:
+            messagebox.showerror(self._tr("Error"), self._tr("Please select a file"))
+            return
+        
+        signature = self.signatures[selected_sig]
+        
+        try:
+            # 读取文件内容
+            with open(filepath, 'rb') as f:
+                file_data = f.read()
+            
+            # 使用RSA公钥加密
+            if 'subject' in signature:  # 这是证书文件
+                cert = crypto.load_certificate(crypto.FILETYPE_PEM, signature['data'])
+                pub_key = crypto.dump_publickey(crypto.FILETYPE_PEM, cert.get_pubkey())
+                rsa_key = RSA.import_key(pub_key)
+            else:  # 这是私钥文件
+                rsa_key = RSA.import_key(signature['data'])
+            
+            cipher = PKCS1_OAEP.new(rsa_key, hashAlgo=SHA256)
+            encrypted_data = cipher.encrypt(file_data)
+            
+            # 保存加密文件
+            output_dir = os.path.join(self.program_dir, "output")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            output_path = os.path.join(output_dir, os.path.basename(filepath) + ".enc")
+            
+            with open(output_path, 'wb') as f:
+                f.write(encrypted_data)
+            
+            messagebox.showinfo(self._tr("Success"), 
+                              f"{self._tr('File encrypted successfully')}\n{output_path}")
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), 
+                               f"{self._tr('Failed to encrypt file')}: {str(e)}")
+
+    def _decrypt_with_signature(self):
+        """使用证书解密文件"""
+        if not self.signatures:
+            messagebox.showerror(self._tr("Error"), self._tr("No certificates available"))
+            return
+        
+        selected_sig = self.signature_var.get()
+        if not selected_sig:
+            messagebox.showerror(self._tr("Error"), self._tr("Please select a certificate"))
+            return
+        
+        filepath = self.sig_file_var.get()
+        if not filepath or not filepath.endswith('.enc'):
+            messagebox.showerror(self._tr("Error"), self._tr("Please select a .enc file"))
+            return
+        
+        signature = self.signatures[selected_sig]
+        
+        try:
+            # 读取加密文件
+            with open(filepath, 'rb') as f:
+                encrypted_data = f.read()
+            
+            # 使用RSA私钥解密
+            if 'key' in signature:  # 这是私钥文件
+                private_key = crypto.load_privatekey(crypto.FILETYPE_PEM, signature['data'])
+                rsa_key = RSA.import_key(crypto.dump_privatekey(crypto.FILETYPE_PEM, private_key))
+            else:  # 这是证书文件，需要私钥
+                messagebox.showerror(self._tr("Error"), self._tr("Private key is required for decryption"))
+                return
+            
+            cipher = PKCS1_OAEP.new(rsa_key, hashAlgo=SHA256)
+            decrypted_data = cipher.decrypt(encrypted_data)
+            
+            # 保存解密文件（去掉.enc后缀）
+            output_dir = os.path.join(self.program_dir, "output")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            original_name = os.path.basename(filepath)[:-4]  # 去掉.enc
+            output_path = os.path.join(output_dir, original_name)
+            
+            with open(output_path, 'wb') as f:
+                f.write(decrypted_data)
+            
+            messagebox.showinfo(self._tr("Success"), 
+                              f"{self._tr('File decrypted successfully')}\n{output_path}")
+        except Exception as e:
+            messagebox.showerror(self._tr("Error"), 
+                               f"{self._tr('Failed to decrypt file')}: {str(e)}")
 
     def _setup_morse_tab(self):
         """摩斯电码标签页"""
@@ -464,7 +897,95 @@ class CryptoApp:
             "Audio libraries not installed": "音频库未安装",
             "Failed to save audio": "保存音频失败",
             "No audio file selected": "未选择音频文件",
-            "Failed to decode audio": "解码音频失败"
+            "Failed to decode audio": "解码音频失败",
+            "Signature Crypto": "签名加密分发",
+            "Signature Config": "数字签名预配置",
+            "Distribution/Extraction": "分发/提取",
+            "Issuer Info": "签发人信息",
+            "Issuer": "签发人",
+            "Issue Date": "签发日期",
+            "Key Settings": "密钥设置",
+            "Primary Key (AES256)": "一级密钥(AES256)",
+            "Secondary Key (BASE64, optional)": "二级密钥(BASE64,可选)",
+            "Generate Random": "随机生成",
+            "Generate Signature": "生成签名",
+            "Load Signature": "加载签名",
+            "Select Signature": "选择签名",
+            "Available Signatures": "可用签名",
+            "File Operation": "文件操作",
+            "Select File": "选择文件",
+            "Encrypt File": "加密文件",
+            "Decrypt File": "解密文件",
+            "No signatures available": "没有可用的签名",
+            "Signature generated successfully": "签名生成成功",
+            "Failed to generate signature": "生成签名失败",
+            "Signature loaded successfully": "签名加载成功",
+            "Failed to load signature": "加载签名失败",
+            "File encrypted successfully": "文件加密成功",
+            "Failed to encrypt file": "加密文件失败",
+            "File decrypted successfully": "文件解密成功",
+            "Failed to decrypt file": "解密文件失败",
+            "Please select a .nlc file": "请选择.nlc文件",
+            "Show Key": "显示密钥",
+            "Select File for Signature Operation": "选择签名操作文件",
+            "Signature Operation": "签名操作",
+            "Signature File": "签名文件",
+            "Select Signature File": "选择签名文件",
+            "Issuer Name": "签发人名称",
+            "Organization": "组织",
+            "Email": "电子邮箱",
+            "Expiry Date": "过期日期",
+            "Key Length": "密钥长度",
+            "Generate Key Pair": "生成密钥对",
+            "Public Key": "公钥",
+            "Private Key": "私钥",
+            "Generate Certificate": "生成证书",
+            "Load Certificate": "加载证书",
+            "Certificate Config": "证书配置",
+            "Generate Signature": "生成签名",
+            "Load Signature": "加载签名",
+            "Select Signature": "选择签名",
+            "Available Signatures": "可用签名",
+            "Select File": "选择文件",
+            "Encrypt File": "加密文件",
+            "Decrypt File": "解密文件",
+            "No signatures available": "没有可用的签名",
+            "Signature generated successfully": "签名生成成功",
+            "Failed to generate signature": "生成签名失败",
+            "Signature loaded successfully": "签名加载成功",
+            "Failed to load signature": "加载签名失败",
+            "File encrypted successfully": "文件加密成功",
+            "Failed to encrypt file": "加密文件失败",
+            "File decrypted successfully": "文件解密成功",
+            "Failed to decrypt file": "解密文件失败",
+            "Private key is required for decryption": "解密需要私钥",
+            "Please select a certificate": "请选择一个证书",
+            "No certificates available": "没有可用的证书",
+            "Please select a file": "请选择一个文件",
+            "Please select a .enc file": "请选择.enc文件",
+            "Show Key": "显示密钥",
+            "Signature File": "签名文件",
+            "Select Signature File": "选择签名文件",
+            "Signature Operation": "签名操作",
+            "READ ME": "说明文档",
+            "About": "关于",
+            "License": "开源协议",
+            "Copyright": "版权信息",
+            "Repository": "项目仓库",
+            "READ_ME_CONTENT": """
+            Sakana Toolkit - 加解密工具箱
+
+            Copyright © 2023 KazusaArabella/Kristen23557
+
+            开源协议: BSD 3-Clause License
+            - 可以自由使用、修改和分发本软件
+            - 需保留版权声明
+            - 不得使用作者名义进行推广
+
+            项目仓库: https://github.com/Kristen23557/Sakana-Toolkit
+
+            这是一个多功能加解密工具箱程序，提供各种加密解密功能。
+            """
         }
 
     def _load_default_english(self):
@@ -565,7 +1086,74 @@ class CryptoApp:
             "Audio libraries not installed": "Audio libraries not installed",
             "Failed to save audio": "Failed to save audio",
             "No audio file selected": "No audio file selected",
-            "Failed to decode audio": "Failed to decode audio"
+            "Failed to decode audio": "Failed to decode audio",
+            "Show Key": "Show Key",
+            "Select File for Signature Operation": "Select File for Signature Operation",
+            "Signature Operation": "Signature Operation",
+            "Signature File": "Signature File",
+            "Select Signature File": "Select Signature File",
+            "Signature loaded successfully": "Signature loaded successfully",
+            "Failed to load signature": "Failed to load signature",
+            "File encrypted successfully": "File encrypted successfully",
+            "Failed to encrypt file": "Failed to encrypt file",
+            "File decrypted successfully": "File decrypted successfully",
+            "Failed to decrypt file": "Failed to decrypt file",
+            "Please select a .nlc file": "Please select a .nlc file",
+            "Issuer Name": "Issuer Name",
+            "Organization": "Organization",
+            "Email": "Email",
+            "Expiry Date": "Expiry Date",
+            "Key Length": "Key Length",
+            "Generate Key Pair": "Generate Key Pair",
+            "Public Key": "Public Key",
+            "Private Key": "Private Key",
+            "Generate Certificate": "Generate Certificate",
+            "Load Certificate": "Load Certificate",
+            "Certificate Config": "Certificate Config",
+            "Generate Signature": "Generate Signature",
+            "Load Signature": "Load Signature",
+            "Select Signature": "Select Signature",
+            "Available Signatures": "Available Signatures",
+            "Select File": "Select File",
+            "Encrypt File": "Encrypt File",
+            "Decrypt File": "Decrypt File",
+            "No signatures available": "No signatures available",
+            "Signature generated successfully": "Signature generated successfully",
+            "Failed to generate signature": "Failed to generate signature",
+            "Signature loaded successfully": "Signature loaded successfully",
+            "Failed to load signature": "Failed to load signature",
+            "File encrypted successfully": "File encrypted successfully",
+            "Failed to encrypt file": "Failed to encrypt file",
+            "File decrypted successfully": "File decrypted successfully",
+            "Failed to decrypt file": "Failed to decrypt file",
+            "Private key is required for decryption": "Private key is required for decryption",
+            "Please select a certificate": "Please select a certificate",
+            "No certificates available": "No certificates available",
+            "Please select a file": "Please select a file",
+            "Please select a .enc file": "Please select a .enc file",
+            "Show Key": "Show Key",
+            "Signature File": "Signature File",
+            "Select Signature File": "Select Signature File",
+            "Signature Operation": "Signature Operation",
+            "READ ME": "READ ME",
+            "About": "About",
+            "License": "License",
+            "Copyright": "Copyright",
+            "Repository": "Repository",
+            "READ_ME_CONTENT": """
+            Sakana Toolkit - Crypto Toolbox
+
+            Copyright © 2023 KazusaArabella/Kristen23557
+
+            License: BSD 3-Clause License
+            - Free to use, modify and distribute
+            - Must retain copyright notice
+            - Cannot use author's name for promotion
+
+            Repository: https://github.com/Kristen23557/Sakana-Toolkit
+
+            A multi-functional crypto toolbox providing various encryption/decryption features.
+            """
         }
         
     def _init_history_file(self):
@@ -776,6 +1364,21 @@ class CryptoApp:
         # 应用按钮
         ttk.Button(self.settings_tab, text=self._tr("Apply Settings"),
                  command=self.apply_settings).pack(pady=10)
+        # READ ME板块
+        readme_frame = ttk.LabelFrame(self.settings_tab, text=self._tr("READ ME"))
+        readme_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # 使用Text组件显示内容
+        readme_text = tk.Text(readme_frame, wrap="word", height=10, 
+                             font=('Bender', 10), padx=5, pady=5)
+        readme_text.pack(fill="both", expand=True)
+
+        # 插入READ ME内容
+        readme_text.insert("1.0", self._tr("READ_ME_CONTENT"))
+        readme_text.config(state="disabled")  # 设置为只读
+
+        # 添加分隔线
+        ttk.Separator(self.settings_tab).pack(fill="x", padx=10, pady=5)
 
         # 创建摩斯电码标签页
         self._setup_morse_tab()
@@ -1493,12 +2096,46 @@ class CryptoApp:
 
     def _update_ui_language(self):
         """更新界面语言"""
-        # 更新标签页标题
+        # 更新主标签页标题
         for i in range(self.notebook.index("end")):
             tab_text = self.notebook.tab(i, "text")
             translated = self._tr(tab_text)
             if translated != tab_text:
                 self.notebook.tab(i, text=translated)
+        
+        # 更新签名加密标签页的子标签页
+        if hasattr(self, 'signature_notebook'):
+            for i in range(self.signature_notebook.index("end")):
+                tab_text = self.signature_notebook.tab(i, "text")
+                translated = self._tr(tab_text)
+                if translated != tab_text:
+                    self.signature_notebook.tab(i, text=translated)
+        
+        # 更新文件嵌入工具标签页的子标签页
+        if hasattr(self, 'file_embed_notebook'):
+            for i in range(self.file_embed_notebook.index("end")):
+                tab_text = self.file_embed_notebook.tab(i, "text")
+                translated = self._tr(tab_text)
+                if translated != tab_text:
+                    self.file_embed_notebook.tab(i, text=translated)
+        
+        # 更新所有标签框架的文本
+        for widget in self.root.winfo_children():
+            if isinstance(widget, ttk.LabelFrame):
+                current_text = widget.cget("text")
+                if current_text:
+                    translated = self._tr(current_text)
+                    if translated != current_text:
+                        widget.config(text=translated)
+        
+        # 更新所有按钮的文本
+        for widget in self.root.winfo_children():
+            if isinstance(widget, ttk.Button):
+                current_text = widget.cget("text")
+                if current_text:
+                    translated = self._tr(current_text)
+                    if translated != current_text:
+                        widget.config(text=translated)
         
         # 这里可以添加其他需要更新语言的UI元素
 
